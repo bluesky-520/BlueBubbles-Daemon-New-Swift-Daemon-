@@ -10,6 +10,7 @@ struct BlueBubblesDaemon {
         let database = MessagesDatabase()
         let appleScriptSender = AppleScriptSender()
         let messagePoller = MessagePoller(database: database)
+        let contactsController = ContactsController()
         
         // Open database
         guard database.open() else {
@@ -24,13 +25,17 @@ struct BlueBubblesDaemon {
         let env = try Environment.detect()
         let app = Application(env)
         defer { app.shutdown() }
+
+        // Reduce noisy request logs if desired
+        app.logger.logLevel = Config.logLevelValue
         
-        // Configure routes
         try healthRoutes(app)
+        try contactsRoutes(app, contactsController: contactsController)
+        try eventsRoutes(app, contactsController: contactsController)
         try chatRoutes(app, database: database)
         try messageRoutes(app, database: database)
         try sendRoutes(app, appleScriptSender: appleScriptSender)
-        
+
         // Configure server
         app.http.server.configuration.hostname = Config.httpHost
         app.http.server.configuration.port = Config.httpPort

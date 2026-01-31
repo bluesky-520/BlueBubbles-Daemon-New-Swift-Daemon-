@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 struct Config {
     // HTTP Server Configuration
@@ -16,6 +17,21 @@ struct Config {
     
     // Logging
     static let logLevel: String = "info"  // debug, info, warning, error
+
+    static var logLevelValue: Logger.Level {
+        switch logLevel.lowercased() {
+        case "trace":
+            return .trace
+        case "debug":
+            return .debug
+        case "warning", "warn":
+            return .warning
+        case "error":
+            return .error
+        default:
+            return .info
+        }
+    }
     
     // Security
     static let requireAuth = false  // Set to true in production

@@ -4,6 +4,7 @@ import SQLite3
 class MessagesDatabase {
     private let dbPath: String
     private var db: OpaquePointer?
+    private let dbQueue = DispatchQueue(label: "com.bluebubbles.messagesdb.serial")
     
     private(set) var lastProcessedRowId: Int64 = 0
     
@@ -18,6 +19,12 @@ class MessagesDatabase {
     // MARK: - Database Connection
     
     func open() -> Bool {
+        dbQueue.sync {
+            openUnlocked()
+        }
+    }
+    
+    private func openUnlocked() -> Bool {
         let result = sqlite3_open(dbPath, &db)
         
         if result != SQLITE_OK {
@@ -31,6 +38,12 @@ class MessagesDatabase {
     }
     
     func close() {
+        dbQueue.sync {
+            closeUnlocked()
+        }
+    }
+    
+    private func closeUnlocked() {
         if db != nil {
             sqlite3_close(db)
             db = nil
@@ -49,6 +62,12 @@ class MessagesDatabase {
     // MARK: - Chat Operations
     
     func getAllChats() -> [Chat] {
+        dbQueue.sync {
+            getAllChatsUnlocked()
+        }
+    }
+    
+    private func getAllChatsUnlocked() -> [Chat] {
         guard let db = db else {
             logger.error("Database not open")
             return []
@@ -61,6 +80,10 @@ class MessagesDatabase {
             chat.guid AS guid,
             chat.display_name AS display_name,
             MAX(message.date) AS last_message_date,
+            (SELECT message.text FROM chat_message_join cmj2
+             JOIN message ON cmj2.message_id = message.ROWID
+             WHERE cmj2.chat_id = chat.ROWID
+             ORDER BY message.date DESC LIMIT 1) AS last_message_text,
             COUNT(message.ROWID) AS message_count
         FROM chat
         LEFT JOIN chat_message_join ON chat.ROWID = chat_message_join.chat_id
@@ -76,7 +99,8 @@ class MessagesDatabase {
                 let guid = String(cString: sqlite3_column_text(statement, 0))
                 let displayName = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? guid
                 let lastMessageDate = sqlite3_column_int64(statement, 2)
-                // let messageCount = sqlite3_column_int(statement, 3)
+                // Column 3 (last_message_text) - add to Chat() when model supports it
+                _ = sqlite3_column_text(statement, 3)
                 
                 let chat = Chat(
                     guid: guid,
@@ -102,6 +126,12 @@ class MessagesDatabase {
     // MARK: - Message Operations
     
     func getMessages(forChatGuid chatGuid: String, limit: Int = 50, before: Int64? = nil) -> [Message] {
+        dbQueue.sync {
+            getMessagesUnlocked(forChatGuid: chatGuid, limit: limit, before: before)
+        }
+    }
+    
+    private func getMessagesUnlocked(forChatGuid chatGuid: String, limit: Int = 50, before: Int64? = nil) -> [Message] {
         guard let db = db else {
             logger.error("Database not open")
             return []
@@ -179,7 +209,7 @@ class MessagesDatabase {
                     dateRead: dateRead > 0 ? dateRead : nil,
                     isFromMe: isFromMe,
                     type: "text",
-                    attachments: getAttachments(forMessageGuid: guid),
+                    attachments: getAttachmentsUnlocked(forMessageGuid: guid),
                     subject: subject,
                     error: error != 0 ? error : nil,
                     associatedMessageGuid: associatedMessageGuid,
@@ -201,6 +231,12 @@ class MessagesDatabase {
     }
     
     func getAttachments(forMessageGuid messageGuid: String) -> [Attachment] {
+        dbQueue.sync {
+            getAttachmentsUnlocked(forMessageGuid: messageGuid)
+        }
+    }
+    
+    private func getAttachmentsUnlocked(forMessageGuid messageGuid: String) -> [Attachment] {
         guard let db = db else { return [] }
         
         var attachments: [Attachment] = []
@@ -250,6 +286,12 @@ class MessagesDatabase {
     // MARK: - Polling for New Messages
     
     func getNewMessages(since lastRowId: Int64) -> ([Message], Int64) {
+        dbQueue.sync {
+            getNewMessagesUnlocked(since: lastRowId)
+        }
+    }
+    
+    private func getNewMessagesUnlocked(since lastRowId: Int64) -> ([Message], Int64) {
         guard let db = db else { return ([], lastRowId) }
         
         var messages: [Message] = []
@@ -319,6 +361,12 @@ class MessagesDatabase {
     // MARK: - Handle Lookup
     
     func getHandle(forId handleId: Int64) -> Handle? {
+        dbQueue.sync {
+            getHandleUnlocked(forId: handleId)
+        }
+    }
+    
+    private func getHandleUnlocked(forId handleId: Int64) -> Handle? {
         guard let db = db else { return nil }
         
         let query = "SELECT ROWID, id, service, uncanonicalized_id FROM handle WHERE ROWID = ?"
