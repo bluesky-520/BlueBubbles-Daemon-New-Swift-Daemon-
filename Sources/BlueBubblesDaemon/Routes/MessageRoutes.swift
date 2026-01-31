@@ -6,11 +6,11 @@ struct MessageUpdatesResponse: Content {
     let receipts: [String]
 }
 
-func messageRoutes(_ app: Application, database: MessagesDatabase) throws {
+func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase) throws {
     
     // MARK: - GET /chats/:chatGuid/messages
     
-    app.get("chats", ":chatGuid", "messages") { req async throws -> [Message] in
+    routes.get("chats", ":chatGuid", "messages") { req async throws -> [Message] in
         let chatGuid = req.parameters.get("chatGuid")!
         let limit = (try? req.query.get(Int.self, at: "limit")) ?? 50
         let before = try? req.query.get(Int64.self, at: "before")
@@ -25,7 +25,7 @@ func messageRoutes(_ app: Application, database: MessagesDatabase) throws {
     
     // MARK: - GET /messages/updates
     
-    app.get("messages", "updates") { req async throws -> MessageUpdatesResponse in
+    routes.get("messages", "updates") { req async throws -> MessageUpdatesResponse in
         let since = (try? req.query.get(Int64.self, at: "since")) ?? 0
         
         logger.debug("Fetching updates since: \(since)")

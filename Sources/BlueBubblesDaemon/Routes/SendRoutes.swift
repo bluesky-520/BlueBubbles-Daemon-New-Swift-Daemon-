@@ -1,10 +1,10 @@
 import Vapor
 
-func sendRoutes(_ app: Application, appleScriptSender: AppleScriptSender) throws {
+func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender) throws {
     
     // MARK: - POST /send
     
-    app.post("send") { req async throws -> [String: String] in
+    routes.post("send") { req async throws -> [String: String] in
         // Parse request body
         let payload = try req.content.decode(SendMessagePayload.self)
         
@@ -31,7 +31,7 @@ func sendRoutes(_ app: Application, appleScriptSender: AppleScriptSender) throws
     
     // MARK: - POST /typing
     
-    app.post("typing") { req async throws -> HTTPStatus in
+    routes.post("typing") { req async throws -> HTTPStatus in
         // Parse request body
         let payload = try req.content.decode(TypingPayload.self)
         

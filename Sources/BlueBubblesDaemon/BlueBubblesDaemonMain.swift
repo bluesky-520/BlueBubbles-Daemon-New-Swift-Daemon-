@@ -31,7 +31,6 @@ struct BlueBubblesDaemon {
         
         try healthRoutes(app)
         try contactsRoutes(app, contactsController: contactsController)
-        try eventsRoutes(app, contactsController: contactsController)
         try chatRoutes(app, database: database)
         try messageRoutes(app, database: database)
         try sendRoutes(app, appleScriptSender: appleScriptSender)

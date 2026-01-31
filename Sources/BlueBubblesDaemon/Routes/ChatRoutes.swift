@@ -1,10 +1,10 @@
 import Vapor
 
-func chatRoutes(_ app: Application, database: MessagesDatabase) throws {
+func chatRoutes(_ routes: RoutesBuilder, database: MessagesDatabase) throws {
     
     // MARK: - GET /chats
     
-    app.get("chats") { req async throws -> [Chat] in
+    routes.get("chats") { req async throws -> [Chat] in
         logger.info("Fetching all chats")
         
         let chats = database.getAllChats()
@@ -15,7 +15,7 @@ func chatRoutes(_ app: Application, database: MessagesDatabase) throws {
     
     // MARK: - GET /chats/:chatGuid
     
-    app.get("chats", ":chatGuid") { req async throws -> Chat in
+    routes.get("chats", ":chatGuid") { req async throws -> Chat in
         let chatGuid = req.parameters.get("chatGuid")!
         
         logger.info("Fetching chat: \(chatGuid)")
