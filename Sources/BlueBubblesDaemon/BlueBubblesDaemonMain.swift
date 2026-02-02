@@ -12,12 +12,21 @@ struct BlueBubblesDaemon {
         let messagePoller = MessagePoller(database: database)
         let contactsController = ContactsController()
         let sentMessageStore = SentMessageStore()
+        let incomingMessageStore = IncomingMessageStore()
         let sendCache = SendCache()
+        let receiptStore = ReceiptStore()
 
         // Open database
         guard database.open() else {
             logger.error("Failed to open Messages database. Exiting.")
             return
+        }
+
+        // Push incoming messages to SSE
+        messagePoller.onNewMessages = { messages in
+            for message in messages {
+                incomingMessageStore.add(message)
+            }
         }
 
         // Start poller
@@ -32,10 +41,10 @@ struct BlueBubblesDaemon {
 
         try healthRoutes(app)
         try contactsRoutes(app, contactsController: contactsController)
-        try eventsRoutes(app, contactsController: contactsController, sentMessageStore: sentMessageStore)
+        try eventsRoutes(app, contactsController: contactsController, sentMessageStore: sentMessageStore, incomingMessageStore: incomingMessageStore)
         try chatRoutes(app, database: database)
-        try messageRoutes(app, database: database, sentMessageStore: sentMessageStore)
-        try sendRoutes(app, appleScriptSender: appleScriptSender, database: database, sentMessageStore: sentMessageStore, sendCache: sendCache)
+        try messageRoutes(app, database: database, sentMessageStore: sentMessageStore, receiptStore: receiptStore)
+        try sendRoutes(app, appleScriptSender: appleScriptSender, database: database, sentMessageStore: sentMessageStore, sendCache: sendCache, receiptStore: receiptStore)
 
         // Configure server
         app.http.server.configuration.hostname = Config.httpHost

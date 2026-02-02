@@ -1,6 +1,9 @@
 import Foundation
 import SQLite3
 
+/// SQLite destructor that copies the string (pointer valid only during bind call)
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 class MessagesDatabase {
     private let dbPath: String
     private var db: OpaquePointer?
@@ -211,94 +214,85 @@ class MessagesDatabase {
         
         var messages: [Message] = []
         
+        // Step 1: Get chat.ROWID for this guid (avoids string binding in main query)
+        var getChatStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT ROWID FROM chat WHERE guid = ? LIMIT 1", -1, &getChatStmt, nil) == SQLITE_OK else {
+            logger.error("Failed to prepare chat ROWID query")
+            return []
+        }
+        defer { sqlite3_finalize(getChatStmt) }
+        
+        chatGuid.withCString { cStr in
+            sqlite3_bind_text(getChatStmt, 1, cStr, -1, SQLITE_TRANSIENT)
+        }
+        guard sqlite3_step(getChatStmt) == SQLITE_ROW else {
+            logger.info("No chat found for guid: \(chatGuid)")
+            return []
+        }
+        let chatRowId = sqlite3_column_int64(getChatStmt, 0)
+        
+        // Step 2: Get messages by chat ROWID (integer only, no string binding)
         var query = """
         SELECT 
-            message.guid AS guid,
-            message.text AS text,
-            message.date AS date,
-            message.date_read AS date_read,
-            message.is_from_me AS is_from_me,
-            message.subject AS subject,
-            message.error AS error,
-            message.associated_message_guid AS associated_message_guid,
-            message.associated_message_type AS associated_message_type,
-            handle.id AS handle_id,
-            handle.id AS handle_address
+            message.guid,
+            message.text,
+            message.date,
+            message.date_read,
+            message.is_from_me,
+            message.subject,
+            message.error,
+            message.associated_message_guid,
+            message.associated_message_type,
+            COALESCE(handle.id, '') AS handle_id
         FROM message
         JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
-        JOIN chat ON chat_message_join.chat_id = chat.ROWID
         LEFT JOIN handle ON message.handle_id = handle.ROWID
-        WHERE chat.guid = ?
+        WHERE chat_message_join.chat_id = \(chatRowId)
         """
-        
-        var params: [Any] = [chatGuid]
-        
         if let beforeDate = before {
-            query += " AND message.date < ?"
-            params.append(beforeDate)
+            query += " AND message.date < \(beforeDate)"
         }
-        
-        query += """
-        ORDER BY message.date DESC
-        LIMIT ?
-        """
-        params.append(limit)
+        query += " ORDER BY message.date DESC LIMIT \(limit)"
         
         var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
+            logger.error("Failed to prepare messages query: \(String(cString: sqlite3_errmsg(db)))")
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
         
-        if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-            // Bind chat GUID
-            sqlite3_bind_text(statement, 1, chatGuid, -1, nil)
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let guidPtr = sqlite3_column_text(statement, 0) else { continue }
+            let guid = String(cString: guidPtr)
+            let text = sqlite3_column_text(statement, 1).map { String(cString: $0) }
+            let dateCreated = sqlite3_column_int64(statement, 2)
+            let dateRead = sqlite3_column_int64(statement, 3)
+            let isFromMe = sqlite3_column_int(statement, 4) == 1
+            let subject = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+            let error = Int(sqlite3_column_int(statement, 6))
+            let associatedMessageGuid = sqlite3_column_text(statement, 7).map { String(cString: $0) }
+            let associatedMessageType = sqlite3_column_text(statement, 8).map { String(cString: $0) }
+            let handleId = sqlite3_column_text(statement, 9).map { String(cString: $0) } ?? ""
             
-            // Bind before date if present
-            if before != nil {
-                sqlite3_bind_int64(statement, 2, before!)
-            }
-            
-            // Bind limit
-            let limitIndex = before != nil ? 3 : 2
-            sqlite3_bind_int(statement, Int32(limitIndex), Int32(limit))
-            
-            while sqlite3_step(statement) == SQLITE_ROW {
-                let guid = String(cString: sqlite3_column_text(statement, 0))
-                let text = sqlite3_column_text(statement, 1).map { String(cString: $0) }
-                let dateCreated = sqlite3_column_int64(statement, 2)
-                let dateRead = sqlite3_column_int64(statement, 3)
-                let isFromMe = sqlite3_column_int(statement, 4) == 1
-                let subject = sqlite3_column_text(statement, 5).map { String(cString: $0) }
-                let error = Int(sqlite3_column_int(statement, 6))
-                let associatedMessageGuid = sqlite3_column_text(statement, 7).map { String(cString: $0) }
-                let associatedMessageType = sqlite3_column_text(statement, 8).map { String(cString: $0) }
-                let handleId = sqlite3_column_text(statement, 9).map { String(cString: $0) } ?? ""
-                let sender = sqlite3_column_text(statement, 10).map { String(cString: $0) } ?? "Unknown"
-                
-                let message = Message(
-                    guid: guid,
-                    text: text,
-                    sender: sender,
-                    handleId: handleId,
-                    dateCreated: dateCreated,
-                    dateRead: dateRead > 0 ? dateRead : nil,
-                    isFromMe: isFromMe,
-                    type: "text",
-                    attachments: getAttachmentsUnlocked(forMessageGuid: guid),
-                    subject: subject,
-                    error: error != 0 ? error : nil,
-                    associatedMessageGuid: associatedMessageGuid,
-                    associatedMessageType: associatedMessageType,
-                    chatGuid: chatGuid
-                )
-                
-                messages.append(message)
-            }
-            
-            sqlite3_finalize(statement)
-        } else {
-            let errorMessage = String(cString: sqlite3_errmsg(db))
-            logger.error("Failed to fetch messages for chat \(chatGuid): \(errorMessage)")
+            let message = Message(
+                guid: guid,
+                text: text,
+                sender: handleId.isEmpty ? "Unknown" : handleId,
+                handleId: handleId,
+                dateCreated: dateCreated,
+                dateRead: dateRead > 0 ? dateRead : nil,
+                isFromMe: isFromMe,
+                type: "text",
+                attachments: getAttachmentsUnlocked(forMessageGuid: guid),
+                subject: subject,
+                error: error != 0 ? error : nil,
+                associatedMessageGuid: associatedMessageGuid,
+                associatedMessageType: associatedMessageType,
+                chatGuid: chatGuid
+            )
+            messages.append(message)
         }
         
-        // Reverse to get chronological order
         return messages.reversed()
     }
     
@@ -354,6 +348,60 @@ class MessagesDatabase {
         
         return attachments
     }
+
+    /// Returns attachment metadata and resolved file path for streaming. Path is nil if file not found.
+    func getAttachmentByGuid(_ attachmentGuid: String) -> (attachment: Attachment, path: String)? {
+        dbQueue.sync {
+            getAttachmentByGuidUnlocked(attachmentGuid)
+        }
+    }
+
+    private func getAttachmentByGuidUnlocked(_ attachmentGuid: String) -> (attachment: Attachment, path: String)? {
+        guard let db = db else { return nil }
+        let query = """
+        SELECT guid, filename, mime_type, transfer_name, total_bytes
+        FROM attachment WHERE guid = ?
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, attachmentGuid, -1, nil)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let guid = String(cString: sqlite3_column_text(statement, 0))
+        let filename = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+        let mimeType = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? "application/octet-stream"
+        let transferName = sqlite3_column_text(statement, 3).map { String(cString: $0) }
+        let totalBytes = sqlite3_column_int64(statement, 4)
+        let attachment = Attachment(
+            guid: guid,
+            filename: filename,
+            mimeType: mimeType,
+            transferName: transferName,
+            totalBytes: totalBytes
+        )
+        let path = resolveAttachmentPath(filename: filename, transferName: transferName, guid: guid)
+        return (attachment, path)
+    }
+
+    /// Resolve file path: use filename if absolute and exists; else try Messages/Attachments/XX/guid/filename.
+    private func resolveAttachmentPath(filename: String, transferName: String?, guid: String) -> String {
+        let fm = FileManager.default
+        if !filename.isEmpty && filename.hasPrefix("/") && fm.fileExists(atPath: filename) {
+            return filename
+        }
+        let messagesDir = (dbPath as NSString).deletingLastPathComponent
+        let first2 = guid.count >= 2 ? String(guid.prefix(2)) : "00"
+        let name = !filename.isEmpty ? (filename as NSString).lastPathComponent : (transferName ?? guid)
+        let candidate = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(guid)/\(name)")
+        if fm.fileExists(atPath: candidate) {
+            return candidate
+        }
+        if !filename.isEmpty {
+            let byFilename = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(guid)/\(filename)")
+            if fm.fileExists(atPath: byFilename) { return byFilename }
+        }
+        return candidate
+    }
     
     // MARK: - Polling for New Messages
     
@@ -404,6 +452,7 @@ class MessagesDatabase {
                 let handleId = sqlite3_column_text(statement, 7).map { String(cString: $0) } ?? ""
                 let chatGuid = String(cString: sqlite3_column_text(statement, 8))
                 
+                let attachments = getAttachmentsUnlocked(forMessageGuid: guid)
                 let message = Message(
                     guid: "\(chatGuid):\(guid)",
                     text: text,
@@ -413,6 +462,11 @@ class MessagesDatabase {
                     dateRead: dateRead > 0 ? dateRead : nil,
                     isFromMe: isFromMe,
                     type: "text",
+                    attachments: attachments.isEmpty ? nil : attachments,
+                    subject: nil,
+                    error: nil,
+                    associatedMessageGuid: nil,
+                    associatedMessageType: nil,
                     chatGuid: chatGuid
                 )
                 

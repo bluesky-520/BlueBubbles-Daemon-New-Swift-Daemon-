@@ -2,7 +2,7 @@ import NIOCore
 import Vapor
 
 /// GET /events - Server-Sent Events for real-time updates (contacts_updated, new_message).
-func eventsRoutes(_ app: Application, contactsController: ContactsController, sentMessageStore: SentMessageStore) throws {
+func eventsRoutes(_ app: Application, contactsController: ContactsController, sentMessageStore: SentMessageStore, incomingMessageStore: IncomingMessageStore) throws {
     app.get("events") { req async throws -> Response in
         logger.info("GET /events - Establishing SSE connection")
 
@@ -41,6 +41,13 @@ func eventsRoutes(_ app: Application, contactsController: ContactsController, se
                         }
 
                         for message in sentMessageStore.takePendingForSSE() {
+                            if let jsonData = try? JSONEncoder().encode(message),
+                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                let event = "event: new_message\ndata: \(jsonString)\n\n"
+                                _ = writer.write(.buffer(ByteBuffer(string: event)))
+                            }
+                        }
+                        for message in incomingMessageStore.takePendingForSSE() {
                             if let jsonData = try? JSONEncoder().encode(message),
                                let jsonString = String(data: jsonData, encoding: .utf8) {
                                 let event = "event: new_message\ndata: \(jsonString)\n\n"

@@ -1,6 +1,6 @@
 import Vapor
 
-func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender, database: MessagesDatabase, sentMessageStore: SentMessageStore, sendCache: SendCache) throws {
+func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender, database: MessagesDatabase, sentMessageStore: SentMessageStore, sendCache: SendCache, receiptStore: ReceiptStore) throws {
 
     // MARK: - POST /send
 
@@ -80,6 +80,16 @@ func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender, d
         
         return .ok
     }
+
+    // MARK: - POST /read_receipt
+
+    routes.post("read_receipt") { req async throws -> HTTPStatus in
+        let payload = try req.content.decode(ReadReceiptPayload.self)
+        let dateRead = Int64(Date().timeIntervalSince1970 * 1000)
+        receiptStore.add(chatGuid: payload.chat_guid, messageGuids: payload.message_guids, dateRead: dateRead)
+        logger.debug("Read receipt: chat=\(payload.chat_guid), messages=\(payload.message_guids.count)")
+        return .ok
+    }
 }
 
 // MARK: - Request / Response Models
@@ -108,6 +118,11 @@ struct SendErrorBody: Content {
 struct TypingPayload: Content {
     let chat_guid: String
     let is_typing: Bool
+}
+
+struct ReadReceiptPayload: Content {
+    let chat_guid: String
+    let message_guids: [String]
 }
 
 // MARK: - Helpers

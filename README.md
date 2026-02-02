@@ -1,82 +1,116 @@
 # BlueBubbles Daemon
 
-Swift/Vapor daemon for macOS that reads the Messages database, sends messages
-via AppleScript, and exposes a local HTTP API for the Node.js bridge.
+Swift/Vapor daemon for macOS that reads the Messages database (`chat.db`), sends messages via AppleScript, and exposes a local HTTP API for the Node.js bridge.
 
 ## What it does
 
-- Reads chats and messages from the local Messages database.
-- Sends messages using AppleScript.
-- Provides a local HTTP API for the bridge at `http://127.0.0.1:8081`.
-- Polls for new messages on a short interval.
+- **Reads** chats and messages from `~/Library/Messages/chat.db`
+- **Sends** messages using AppleScript (Messages.app)
+- **Exposes** HTTP API at `http://127.0.0.1:8081` for the Node.js bridge
+- **Polls** for new messages and pushes them over SSE
+- **Contacts** from the system Address Book (optional vCard export)
 
 ## Requirements
 
-- macOS 12 or newer.
-- Swift 5.9 toolchain (Xcode or swift.org toolchain).
-- Full Disk Access for the daemon or the terminal you run it from.
+- macOS 12 or newer
+- Swift 5.9+ (Xcode or swift.org toolchain)
+- **Full Disk Access** for the process that runs the daemon (Terminal or the binary)
 
 ## Setup
 
-1. Grant Full Disk Access to the terminal app or the compiled daemon binary.
-2. Ensure Messages.app has been opened at least once for the current user.
+1. Grant **Full Disk Access** to Terminal (or the app that will run the daemon):  
+   System Settings → Privacy & Security → Full Disk Access
+2. Open **Messages.app** at least once for the current user so `~/Library/Messages/chat.db` exists
 
 ## Configuration
 
-Settings live in `Sources/BlueBubblesDaemon/Utils/Config.swift`:
+Edit `Sources/BlueBubblesDaemon/Utils/Config.swift`:
 
-- `httpHost` / `httpPort` (default `127.0.0.1:8081`)
-- `messagesDBPath` (default `~/Library/Messages/chat.db`)
-- `pollInterval` (seconds)
-- `logLevel`
+| Setting          | Default                    | Description                    |
+|------------------|----------------------------|--------------------------------|
+| `httpHost`       | `"127.0.0.1"`             | Bind address                   |
+| `httpPort`       | `8081`                    | HTTP port                      |
+| `messagesDBPath` | `~/Library/Messages/chat.db`| Messages database path         |
+| `pollInterval`   | `1.0`                     | New-message poll interval (s)  |
+| `logLevel`       | `"info"`                  | `trace` / `debug` / `info` / `warning` / `error` |
 
 ## Build and run
 
-Development build:
+**Development:**
 
-```
+```bash
 swift build
-swift run BlueBubblesDaemon
+swift run bluebubbles-daemon
 ```
 
-Release build:
+**Release:**
 
-```
+```bash
 swift build -c release
 .build/release/bluebubbles-daemon
 ```
 
+**Run as a service (launchd):**  
+Use the provided `com.bluebubbles.daemon.plist` and point `WorkingDirectory` and executable path to your build.
+
 ## HTTP API
 
-Base URL: `http://127.0.0.1:8081`
+Base URL: **`http://127.0.0.1:8081`**
 
-Health:
+### Health
 
-- `GET /ping` → HTTP 200
-- `GET /health` → status, timestamp, database availability, uptime
+| Method | Path      | Description |
+|--------|-----------|-------------|
+| GET    | `/ping`   | 200 OK      |
+| GET    | `/health` | JSON: status, timestamp, databaseAccessible, uptime |
 
-Chats:
+### Chats
 
-- `GET /chats` → list chats
-- `GET /chats/:chatGuid` → chat details
-- `GET /chats/:chatGuid/messages?limit=50&before=TIMESTAMP`
+| Method | Path                    | Description |
+|--------|-------------------------|-------------|
+| GET    | `/chats`                | List all chats |
+| GET    | `/chats/:chatGuid`      | Single chat by GUID (404 if not found) |
+| GET    | `/chats/:chatGuid/messages` | Messages for chat. Query: `limit` (default 50), `before` (optional timestamp) |
 
-Messages:
+**Chat GUID:** Use the exact `guid` from `GET /chats` (e.g. `SMS;-;+13108771635`). If the path contains `;` or `+`, URL-encode: `;` → `%3B`, `+` → `%2B`.  
+Example: `GET /chats/SMS%3B-%3B%2B13108771635/messages?limit=10`
 
-- `GET /messages/updates?since=TIMESTAMP` → new messages since timestamp
+### Messages & updates
 
-Send:
+| Method | Path                    | Description |
+|--------|-------------------------|-------------|
+| GET    | `/messages/updates`     | New messages, typing, read receipts since `since`. Query: `since` (ms since Unix epoch or Apple nanoseconds; values &lt; 10¹⁵ treated as ms) |
+| GET    | `/attachments/:guid`    | Stream attachment file (Content-Type, Content-Disposition set) |
 
-- `POST /send` → `{ chat_guid, text }`
-- `POST /typing` → `{ chat_guid, is_typing }`
+### Send & actions
 
-## Notes and limitations
+| Method | Path           | Body | Description |
+|--------|----------------|------|-------------|
+| POST   | `/send`        | `{ "chat_guid": "...", "text": "...", "temp_guid?", "attachment_paths?" }` | Send message (AppleScript) |
+| POST   | `/typing`      | `{ "chat_guid": "...", "is_typing": true/false }` | Typing indicator |
+| POST   | `/read_receipt`| `{ "chat_guid": "...", "message_guids": ["..."] }` | Mark messages read; returned once in `GET /messages/updates` |
 
-- The updates endpoint currently scans all chats per request and returns empty
-  typing/read-receipt arrays.
-- Authentication is not enforced by default; this daemon is intended to be bound
-  to localhost and used by the Node.js bridge.
+### Contacts
 
-## Related projects
+| Method | Path              | Description |
+|--------|-------------------|-------------|
+| GET    | `/contacts`       | List contacts. Query: `limit`, `offset`, `extraProperties` (e.g. `avatar`) |
+| GET    | `/contacts/vcf`   | Contacts as vCard string |
+| GET    | `/contacts/changed` | JSON: `lastChanged` timestamp (for polling) |
 
-- Node.js bridge: `../BlueBubbles-Compatible Python Bridge`
+### Events (SSE)
+
+| Method | Path     | Description |
+|--------|----------|-------------|
+| GET    | `/events`| Server-Sent Events: `connected`, `contacts_updated`, `new_message` (sent and incoming) |
+
+## Implementation notes
+
+- **Messages by chat:** The daemon resolves the chat by GUID to a `chat.ROWID`, then queries messages by that integer to avoid string-binding issues with GUIDs containing `;` and `+`.
+- **Updates:** `GET /messages/updates` scans all chats; typing is acknowledged in memory; read receipts are stored in memory and returned once on the next poll.
+- **Auth:** Not enforced by default; daemon is intended to listen on localhost and be used only by the Node.js bridge.
+
+## Related
+
+- **Node.js bridge:** `../BlueBubbles-Compatible Python Bridge` (talks to this daemon on port 8081)
+- **curl examples:** See workspace `CURL_TEST_COMMANDS.md` for copy-paste test commands
