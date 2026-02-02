@@ -1,13 +1,12 @@
 import NIOCore
 import Vapor
 
-/// GET /events - Server-Sent Events for real-time updates (e.g. contacts_updated).
-/// Clients can subscribe to receive address book sync notifications.
-func eventsRoutes(_ app: Application, contactsController: ContactsController) throws {
+/// GET /events - Server-Sent Events for real-time updates (contacts_updated, new_message).
+func eventsRoutes(_ app: Application, contactsController: ContactsController, sentMessageStore: SentMessageStore) throws {
     app.get("events") { req async throws -> Response in
         logger.info("GET /events - Establishing SSE connection")
 
-        var response = Response()
+        let response = Response()
         response.status = .ok
         response.headers.contentType = HTTPMediaType(type: "text", subType: "event-stream")
         response.headers.add(name: "Cache-Control", value: "no-cache")
@@ -19,12 +18,12 @@ func eventsRoutes(_ app: Application, contactsController: ContactsController) th
             Task {
                 do {
                     let connectEvent = "event: connected\ndata: {\"status\": \"connected\"}\n\n"
-                    try await writer.write(.buffer(ByteBuffer(string: connectEvent)))
+                    _ = writer.write(.buffer(ByteBuffer(string: connectEvent)))
 
                     var lastContactsSync = contactsController.getLastContactsChangeTime()
 
                     while !Task.isCancelled {
-                        try await Task.sleep(nanoseconds: 2_000_000_000)
+                        try await Task.sleep(nanoseconds: 500_000_000)
 
                         let current = contactsController.getLastContactsChangeTime()
                         if current > lastContactsSync {
@@ -36,14 +35,22 @@ func eventsRoutes(_ app: Application, contactsController: ContactsController) th
                             if let jsonData = try? JSONSerialization.data(withJSONObject: contactEventData),
                                let jsonString = String(data: jsonData, encoding: .utf8) {
                                 let event = "event: contacts_updated\ndata: \(jsonString)\n\n"
-                                try await writer.write(.buffer(ByteBuffer(string: event)))
+                                _ = writer.write(.buffer(ByteBuffer(string: event)))
                             }
                             lastContactsSync = current
+                        }
+
+                        for message in sentMessageStore.takePendingForSSE() {
+                            if let jsonData = try? JSONEncoder().encode(message),
+                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                let event = "event: new_message\ndata: \(jsonString)\n\n"
+                                _ = writer.write(.buffer(ByteBuffer(string: event)))
+                            }
                         }
                     }
                 } catch {
                     logger.error("SSE stream error: \(error.localizedDescription)")
-                    try? await writer.write(.end)
+                    _ = writer.write(.end)
                 }
             }
         }

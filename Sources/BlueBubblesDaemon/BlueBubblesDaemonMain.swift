@@ -3,7 +3,7 @@ import Logging
 
 @main
 struct BlueBubblesDaemon {
-    static func main() throws {
+    static func main() async throws {
         logger.info("🚀 Starting BlueBubbles Daemon...")
         
         // Initialize services
@@ -11,29 +11,31 @@ struct BlueBubblesDaemon {
         let appleScriptSender = AppleScriptSender()
         let messagePoller = MessagePoller(database: database)
         let contactsController = ContactsController()
-        
+        let sentMessageStore = SentMessageStore()
+        let sendCache = SendCache()
+
         // Open database
         guard database.open() else {
             logger.error("Failed to open Messages database. Exiting.")
             return
         }
-        
+
         // Start poller
         messagePoller.start()
-        
+
         // Setup Vapor app
         let env = try Environment.detect()
-        let app = Application(env)
-        defer { app.shutdown() }
+        let app = try await Application.make(env)
 
         // Reduce noisy request logs if desired
         app.logger.logLevel = Config.logLevelValue
-        
+
         try healthRoutes(app)
         try contactsRoutes(app, contactsController: contactsController)
+        try eventsRoutes(app, contactsController: contactsController, sentMessageStore: sentMessageStore)
         try chatRoutes(app, database: database)
-        try messageRoutes(app, database: database)
-        try sendRoutes(app, appleScriptSender: appleScriptSender)
+        try messageRoutes(app, database: database, sentMessageStore: sentMessageStore)
+        try sendRoutes(app, appleScriptSender: appleScriptSender, database: database, sentMessageStore: sentMessageStore, sendCache: sendCache)
 
         // Configure server
         app.http.server.configuration.hostname = Config.httpHost
@@ -58,7 +60,8 @@ struct BlueBubblesDaemon {
         ╚═══════════════════════════════════════════════════════════╝
         """)
         
-        // Start server
-        try app.run()
+        // Start server (runs until interrupted)
+        try await app.execute()
+        try await app.asyncShutdown()
     }
 }

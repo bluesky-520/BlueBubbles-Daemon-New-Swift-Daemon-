@@ -1,5 +1,10 @@
 import Vapor
 
+/// BlueBubbles-compatible participant (handle) in a chat.
+struct ChatParticipant: Content, Equatable {
+    let address: String
+}
+
 struct Chat: Content, Equatable {
     let guid: String
     let displayName: String
@@ -7,6 +12,7 @@ struct Chat: Content, Equatable {
     let lastMessageText: String?
     let unreadCount: Int
     let isArchived: Bool
+    let participants: [ChatParticipant]
 
     init(
         guid: String,
@@ -14,7 +20,8 @@ struct Chat: Content, Equatable {
         lastMessageDate: Int64? = nil,
         lastMessageText: String? = nil,
         unreadCount: Int = 0,
-        isArchived: Bool = false
+        isArchived: Bool = false,
+        participants: [ChatParticipant] = []
     ) {
         self.guid = guid
         self.displayName = displayName
@@ -22,5 +29,6 @@ struct Chat: Content, Equatable {
         self.lastMessageText = lastMessageText
         self.unreadCount = unreadCount
         self.isArchived = isArchived
+        self.participants = participants
     }
 }

@@ -6,19 +6,26 @@ struct MessageUpdatesResponse: Content {
     let receipts: [String]
 }
 
-func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase) throws {
-    
+func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMessageStore: SentMessageStore) throws {
+
     // MARK: - GET /chats/:chatGuid/messages
-    
+
     routes.get("chats", ":chatGuid", "messages") { req async throws -> [Message] in
         let chatGuid = req.parameters.get("chatGuid")!
         let limit = (try? req.query.get(Int.self, at: "limit")) ?? 50
         let before = try? req.query.get(Int64.self, at: "before")
-        
+
         logger.info("Fetching messages for chat \(chatGuid), limit: \(limit)")
-        
-        let messages = database.getMessages(forChatGuid: chatGuid, limit: limit, before: before)
-        
+
+        var messages = database.getMessages(forChatGuid: chatGuid, limit: limit, before: before)
+        let sentRecent = sentMessageStore.getRecent(forChatGuid: chatGuid)
+        for sent in sentRecent {
+            if !messages.contains(where: { $0.guid == sent.guid }) {
+                messages.append(sent)
+            }
+        }
+        messages.sort { $0.dateCreated < $1.dateCreated }
+
         logger.debug("Returning \(messages.count) messages for chat \(chatGuid)")
         return messages
     }
