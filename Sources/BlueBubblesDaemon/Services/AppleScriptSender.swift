@@ -130,17 +130,6 @@ class AppleScriptSender {
         return executeAppleScript(script)
     }
 
-    /// Sends to a single recipient using account 1 (iMessage). Fallback when no chat/recipient list.
-    func sendMessage(to recipient: String, text: String, attachmentPaths: [String]? = nil) -> Bool {
-        sendToSingleRecipient(
-            recipient: recipient,
-            accountIndex: 1,
-            text: escapeForAppleScript(text),
-            attachmentPaths: attachmentPaths ?? [],
-            serviceType: "iMessage"
-        )
-    }
-
     // MARK: - Attachment helpers (AppleScript)
 
     /// Builds script that populates `fileList` from POSIX paths *outside* "tell application Messages" to avoid sandbox issues.

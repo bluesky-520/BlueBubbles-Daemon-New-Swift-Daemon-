@@ -67,12 +67,35 @@ class MessagesDatabase {
         }
     }
     
+    /// Returns [chatGuid: [ChatParticipant]] for all chats (one query).
+    private func getAllParticipantsByChatGuidUnlocked() -> [String: [ChatParticipant]] {
+        guard let db = db else { return [:] }
+        let query = """
+        SELECT chat.guid, handle.id
+        FROM chat
+        JOIN chat_handle_join ON chat.ROWID = chat_handle_join.chat_id
+        JOIN handle ON handle.ROWID = chat_handle_join.handle_id
+        ORDER BY chat.ROWID, chat_handle_join.handle_id
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return [:] }
+        defer { sqlite3_finalize(statement) }
+        var result: [String: [ChatParticipant]] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let guid = String(cString: sqlite3_column_text(statement, 0))
+            let address = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+            result[guid, default: []].append(ChatParticipant(address: address))
+        }
+        return result
+    }
+    
     private func getAllChatsUnlocked() -> [Chat] {
         guard let db = db else {
             logger.error("Database not open")
             return []
         }
         
+        let participantsByGuid = getAllParticipantsByChatGuidUnlocked()
         var chats: [Chat] = []
         
         let query = """
@@ -99,15 +122,17 @@ class MessagesDatabase {
                 let guid = String(cString: sqlite3_column_text(statement, 0))
                 let displayName = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? guid
                 let lastMessageDate = sqlite3_column_int64(statement, 2)
-                // Column 3 (last_message_text) - add to Chat() when model supports it
                 _ = sqlite3_column_text(statement, 3)
+                
+                let participants = participantsByGuid[guid] ?? []
                 
                 let chat = Chat(
                     guid: guid,
                     displayName: displayName,
                     lastMessageDate: lastMessageDate > 0 ? lastMessageDate : nil,
-                    unreadCount: 0,  // TODO: Calculate unread
-                    isArchived: false
+                    unreadCount: 0,
+                    isArchived: false,
+                    participants: participants
                 )
                 
                 chats.append(chat)
@@ -121,6 +146,53 @@ class MessagesDatabase {
         
         logger.debug("Fetched \(chats.count) chats from database")
         return chats
+    }
+    
+    /// Returns the chat_identifier for AppleScript "chat id" (e.g. iMessage;-;+1234567890).
+    func getChatIdentifier(forChatGuid chatGuid: String) -> String? {
+        dbQueue.sync {
+            getChatIdentifierUnlocked(forChatGuid: chatGuid)
+        }
+    }
+    
+    private func getChatIdentifierUnlocked(forChatGuid chatGuid: String) -> String? {
+        guard let db = db else { return nil }
+        let query = "SELECT chat_identifier FROM chat WHERE guid = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, chatGuid, -1, nil)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let cString = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: cString)
+    }
+    
+    /// Returns participant handles for a chat (for buddy-based send fallback).
+    func getChatRecipients(forChatGuid chatGuid: String) -> [String] {
+        dbQueue.sync {
+            getChatRecipientsUnlocked(forChatGuid: chatGuid)
+        }
+    }
+    
+    private func getChatRecipientsUnlocked(forChatGuid chatGuid: String) -> [String] {
+        guard let db = db else { return [] }
+        let query = """
+        SELECT handle.id FROM handle
+        JOIN chat_handle_join ON chat_handle_join.handle_id = handle.ROWID
+        JOIN chat ON chat.ROWID = chat_handle_join.chat_id
+        WHERE chat.guid = ?
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, chatGuid, -1, nil)
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let cString = sqlite3_column_text(statement, 0) {
+                result.append(String(cString: cString))
+            }
+        }
+        return result
     }
     
     // MARK: - Message Operations
@@ -356,46 +428,5 @@ class MessagesDatabase {
         }
         
         return (messages, maxRowId)
-    }
-    
-    // MARK: - Handle Lookup
-    
-    func getHandle(forId handleId: Int64) -> Handle? {
-        dbQueue.sync {
-            getHandleUnlocked(forId: handleId)
-        }
-    }
-    
-    private func getHandleUnlocked(forId handleId: Int64) -> Handle? {
-        guard let db = db else { return nil }
-        
-        let query = "SELECT ROWID, id, service, uncanonicalized_id FROM handle WHERE ROWID = ?"
-        
-        var statement: OpaquePointer?
-        
-        if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_int64(statement, 1, handleId)
-            
-            if sqlite3_step(statement) == SQLITE_ROW {
-                let id = sqlite3_column_int64(statement, 0)
-                let address = String(cString: sqlite3_column_text(statement, 1))
-                let service = String(cString: sqlite3_column_text(statement, 2))
-                let uncanonicalizedId = sqlite3_column_text(statement, 3).map { String(cString: $0) }
-                
-                let handle = Handle(
-                    id: id,
-                    address: address,
-                    service: service,
-                    uncanonicalizedId: uncanonicalizedId
-                )
-                
-                sqlite3_finalize(statement)
-                return handle
-            }
-            
-            sqlite3_finalize(statement)
-        }
-        
-        return nil
     }
 }
