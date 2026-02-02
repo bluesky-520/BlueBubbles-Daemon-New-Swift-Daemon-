@@ -40,6 +40,7 @@ struct BlueBubblesDaemon {
         app.logger.logLevel = Config.logLevelValue
 
         try healthRoutes(app)
+        try statisticsRoutes(app, database: database)
         try contactsRoutes(app, contactsController: contactsController)
         try eventsRoutes(app, contactsController: contactsController, sentMessageStore: sentMessageStore, incomingMessageStore: incomingMessageStore)
         try chatRoutes(app, database: database)

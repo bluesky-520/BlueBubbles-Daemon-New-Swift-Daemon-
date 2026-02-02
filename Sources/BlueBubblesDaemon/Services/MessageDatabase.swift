@@ -483,4 +483,89 @@ class MessagesDatabase {
         
         return (messages, maxRowId)
     }
+    
+    // MARK: - Statistics (matches official BlueBubbles server format)
+    
+    /// Returns database totals: handles, messages, chats, attachments.
+    /// Supports `only` filter: handle, message, chat, attachment (comma-separated).
+    func getStatisticsTotals(only: [String]? = nil) -> [String: Int] {
+        dbQueue.sync {
+            getStatisticsTotalsUnlocked(only: only)
+        }
+    }
+    
+    private func getStatisticsTotalsUnlocked(only: [String]?) -> [String: Int] {
+        guard let db = db else { return [:] }
+        let items = only ?? ["handle", "message", "chat", "attachment"]
+        let set = Set(items.map { $0.lowercased().replacingOccurrences(of: "s$", with: "", options: .regularExpression) })
+        var result: [String: Int] = [:]
+        
+        if set.contains("handle") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM handle") {
+                result["handles"] = count
+            }
+        }
+        if set.contains("message") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM message") {
+                result["messages"] = count
+            }
+        }
+        if set.contains("chat") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM chat") {
+                result["chats"] = count
+            }
+        }
+        if set.contains("attachment") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM attachment") {
+                result["attachments"] = count
+            }
+        }
+        return result
+    }
+    
+    /// Returns media totals: images, videos, locations (matches official server).
+    /// Supports `only` filter: image, video, location (comma-separated).
+    func getStatisticsMedia(only: [String]? = nil) -> [String: Int] {
+        dbQueue.sync {
+            getStatisticsMediaUnlocked(only: only)
+        }
+    }
+    
+    private func getStatisticsMediaUnlocked(only: [String]?) -> [String: Int] {
+        guard let db = db else { return [:] }
+        let items = only ?? ["image", "video", "location"]
+        let set = Set(items.map { $0.lowercased().replacingOccurrences(of: "s$", with: "", options: .regularExpression) })
+        var result: [String: Int] = [:]
+        
+        if set.contains("image") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM attachment WHERE mime_type LIKE 'image/%'") {
+                result["images"] = count
+            }
+        }
+        if set.contains("video") {
+            if let count = runCountQuery(db, "SELECT COUNT(*) FROM attachment WHERE mime_type LIKE 'video/%'") {
+                result["videos"] = count
+            }
+        }
+        if set.contains("location") {
+            // Text-based location sharing (works across macOS versions; balloon_bundle_id may not exist on older DBs)
+            let locQuery = """
+                SELECT COUNT(DISTINCT m.ROWID) FROM message m
+                WHERE m.text LIKE '%maps.apple.com%' OR m.text LIKE '%maps.google.com%' OR m.text LIKE 'geo:%'
+            """
+            if let count = runCountQuery(db, locQuery) {
+                result["locations"] = count
+            }
+        }
+        return result
+    }
+    
+    private func runCountQuery(_ db: OpaquePointer?, _ sql: String) -> Int? {
+        guard let db = db else { return nil }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Int(sqlite3_column_int(statement, 0))
+    }
 }
