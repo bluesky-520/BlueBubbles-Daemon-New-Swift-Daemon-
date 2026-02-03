@@ -28,7 +28,7 @@ func contactsRoutes(_ app: Application, contactsController: ContactsController) 
     app.get("contacts", "changed") { req -> Response in
         let timestamp = Int64(contactsController.getLastContactsChangeTime().timeIntervalSince1970)
         let body = "{\"lastChanged\":\(timestamp)}\n"
-        var response = Response(status: .ok)
+        let response = Response(status: .ok)
         response.headers.contentType = .json
         response.body = .init(buffer: ByteBuffer(string: body))
         return response

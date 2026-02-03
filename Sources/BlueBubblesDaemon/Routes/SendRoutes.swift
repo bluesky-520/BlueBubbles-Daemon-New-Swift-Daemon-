@@ -129,7 +129,7 @@ struct ReadReceiptPayload: Content {
 
 private func jsonResponse<T: Encodable>(status: HTTPStatus, body: T) throws -> Response {
     let data = try JSONEncoder().encode(body)
-    var res = Response(status: status)
+    let res = Response(status: status)
     res.headers.contentType = .json
     res.body = .init(data: data)
     return res

@@ -84,7 +84,7 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
             return Response(status: .internalServerError)
         }
         let downloadName = result.attachment.filename.isEmpty ? guid : (result.attachment.filename as NSString).lastPathComponent
-        var response = Response(status: .ok)
+        let response = Response(status: .ok)
         response.headers.contentType = .init(type: result.attachment.mimeType.split(separator: "/").first.map(String.init) ?? "application", subType: result.attachment.mimeType.split(separator: "/").dropFirst().first.map(String.init) ?? "octet-stream")
         response.headers.add(name: "Content-Disposition", value: "attachment; filename=\"\(downloadName)\"")
         response.body = .init(buffer: ByteBuffer(data: data))
