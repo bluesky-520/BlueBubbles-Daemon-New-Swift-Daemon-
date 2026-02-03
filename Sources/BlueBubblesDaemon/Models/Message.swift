@@ -54,7 +54,25 @@ struct Message: Content, Equatable {
 struct Attachment: Content, Equatable {
     let guid: String
     let filename: String
+    let uti: String?
     let mimeType: String
     let transferName: String?
     let totalBytes: Int64
+    /// Optional ROWID for BlueBubbles client compatibility (originalROWID).
+    let originalROWID: Int64?
+
+    init(guid: String, filename: String, uti: String? = nil, mimeType: String, transferName: String?, totalBytes: Int64, originalROWID: Int64? = nil) {
+        self.guid = guid
+        self.filename = filename
+        self.uti = uti
+        self.mimeType = mimeType
+        self.transferName = transferName
+        self.totalBytes = totalBytes
+        self.originalROWID = originalROWID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case guid, filename, mimeType, transferName, totalBytes, uti
+        case originalROWID
+    }
 }

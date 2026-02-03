@@ -70,6 +70,15 @@ class MessagesDatabase {
         }
     }
     
+    /// True when last message has no text worth showing (nil, empty, whitespace, or only ￼ placeholder).
+    private func lastMessageHasNoMeaningfulText(_ text: String?) -> Bool {
+        guard let s = text else { return true }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        let withoutPlaceholder = trimmed.replacingOccurrences(of: "\u{FFFC}", with: "") // object replacement char ￼
+        return withoutPlaceholder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Returns [chatGuid: [ChatParticipant]] for all chats (one query).
     private func getAllParticipantsByChatGuidUnlocked() -> [String: [ChatParticipant]] {
         guard let db = db else { return [:] }
@@ -110,6 +119,15 @@ class MessagesDatabase {
              JOIN message ON cmj2.message_id = message.ROWID
              WHERE cmj2.chat_id = chat.ROWID
              ORDER BY message.date DESC LIMIT 1) AS last_message_text,
+            (SELECT message.attributedBody FROM chat_message_join cmj2
+             JOIN message ON cmj2.message_id = message.ROWID
+             WHERE cmj2.chat_id = chat.ROWID
+             ORDER BY message.date DESC LIMIT 1) AS last_message_attributed_body,
+            (SELECT COUNT(*) FROM message_attachment_join maj
+             WHERE maj.message_id = (SELECT message.ROWID FROM chat_message_join cmj3
+              JOIN message ON cmj3.message_id = message.ROWID
+              WHERE cmj3.chat_id = chat.ROWID
+              ORDER BY message.date DESC LIMIT 1)) AS last_message_attachment_count,
             COUNT(message.ROWID) AS message_count
         FROM chat
         LEFT JOIN chat_message_join ON chat.ROWID = chat_message_join.chat_id
@@ -125,7 +143,24 @@ class MessagesDatabase {
                 let guid = String(cString: sqlite3_column_text(statement, 0))
                 let displayName = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? guid
                 let lastMessageDate = sqlite3_column_int64(statement, 2)
-                _ = sqlite3_column_text(statement, 3)
+                var lastMessageText = sqlite3_column_text(statement, 3).map { String(cString: $0) }
+                let lastMessageAttributedBody: Data? = {
+                    guard let blob = sqlite3_column_blob(statement, 4) else { return nil }
+                    let bytes = sqlite3_column_bytes(statement, 4)
+                    guard bytes > 0 else { return nil }
+                    return Data(bytes: blob, count: Int(bytes))
+                }()
+                if (lastMessageText == nil || lastMessageText?.isEmpty == true),
+                   let extracted = AttributedBodyDecoder.extractText(from: lastMessageAttributedBody) {
+                    lastMessageText = extracted
+                }
+                let lastMessageAttachmentCount = Int(sqlite3_column_int(statement, 5))
+                if lastMessageHasNoMeaningfulText(lastMessageText),
+                   lastMessageAttachmentCount > 0 {
+                    lastMessageText = lastMessageAttachmentCount == 1
+                        ? "Attachment: 1 Photo"
+                        : "Attachment: \(lastMessageAttachmentCount) Photos"
+                }
                 
                 let participants = participantsByGuid[guid] ?? []
                 
@@ -133,6 +168,7 @@ class MessagesDatabase {
                     guid: guid,
                     displayName: displayName,
                     lastMessageDate: lastMessageDate > 0 ? lastMessageDate : nil,
+                    lastMessageText: lastMessageText,
                     unreadCount: 0,
                     isArchived: false,
                     participants: participants
@@ -222,7 +258,7 @@ class MessagesDatabase {
         }
         defer { sqlite3_finalize(getChatStmt) }
         
-        chatGuid.withCString { cStr in
+        _ = chatGuid.withCString { cStr in
             sqlite3_bind_text(getChatStmt, 1, cStr, -1, SQLITE_TRANSIENT)
         }
         guard sqlite3_step(getChatStmt) == SQLITE_ROW else {
@@ -232,10 +268,12 @@ class MessagesDatabase {
         let chatRowId = sqlite3_column_int64(getChatStmt, 0)
         
         // Step 2: Get messages by chat ROWID (integer only, no string binding)
+        // attributedBody: on Ventura+, text is stored here when message.text is NULL
         var query = """
         SELECT 
             message.guid,
             message.text,
+            message.attributedBody,
             message.date,
             message.date_read,
             message.is_from_me,
@@ -264,15 +302,26 @@ class MessagesDatabase {
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let guidPtr = sqlite3_column_text(statement, 0) else { continue }
             let guid = String(cString: guidPtr)
-            let text = sqlite3_column_text(statement, 1).map { String(cString: $0) }
-            let dateCreated = sqlite3_column_int64(statement, 2)
-            let dateRead = sqlite3_column_int64(statement, 3)
-            let isFromMe = sqlite3_column_int(statement, 4) == 1
-            let subject = sqlite3_column_text(statement, 5).map { String(cString: $0) }
-            let error = Int(sqlite3_column_int(statement, 6))
-            let associatedMessageGuid = sqlite3_column_text(statement, 7).map { String(cString: $0) }
-            let associatedMessageType = sqlite3_column_text(statement, 8).map { String(cString: $0) }
-            let handleId = sqlite3_column_text(statement, 9).map { String(cString: $0) } ?? ""
+            var text = sqlite3_column_text(statement, 1).map { String(cString: $0) }
+            let attributedBodyData: Data? = {
+                guard let blob = sqlite3_column_blob(statement, 2) else { return nil }
+                let bytes = sqlite3_column_bytes(statement, 2)
+                guard bytes > 0 else { return nil }
+                return Data(bytes: blob, count: Int(bytes))
+            }()
+            let dateCreated = sqlite3_column_int64(statement, 3)
+            let dateRead = sqlite3_column_int64(statement, 4)
+            let isFromMe = sqlite3_column_int(statement, 5) == 1
+            let subject = sqlite3_column_text(statement, 6).map { String(cString: $0) }
+            let error = Int(sqlite3_column_int(statement, 7))
+            let associatedMessageGuid = sqlite3_column_text(statement, 8).map { String(cString: $0) }
+            let associatedMessageType = sqlite3_column_text(statement, 9).map { String(cString: $0) }
+            let handleId = sqlite3_column_text(statement, 10).map { String(cString: $0) } ?? ""
+            
+            // Fallback: on Ventura+, text is often in attributedBody when message.text is NULL
+            if (text == nil || text?.isEmpty == true), let extracted = AttributedBodyDecoder.extractText(from: attributedBodyData) {
+                text = extracted
+            }
             
             let message = Message(
                 guid: guid,
@@ -307,11 +356,15 @@ class MessagesDatabase {
         
         var attachments: [Attachment] = []
         
+        // Match official BlueBubbles: join message_attachment_join to get attachments for this message.
+        // Use COALESCE for uti (older DBs may not have it); guard NULL guid.
         let query = """
         SELECT 
+            attachment.ROWID AS attachment_rowid,
             attachment.guid AS guid,
             attachment.filename AS filename,
-            attachment.mime_type AS mime_type,
+            COALESCE(attachment.uti, '') AS uti,
+            COALESCE(attachment.mime_type, 'application/octet-stream') AS mime_type,
             attachment.transfer_name AS transfer_name,
             attachment.total_bytes AS total_bytes
         FROM attachment
@@ -323,27 +376,31 @@ class MessagesDatabase {
         var statement: OpaquePointer?
         
         if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, messageGuid, -1, nil)
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_text(statement, 1, messageGuid, -1, SQLITE_TRANSIENT)
             
             while sqlite3_step(statement) == SQLITE_ROW {
-                let guid = String(cString: sqlite3_column_text(statement, 0))
-                let filename = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
-                let mimeType = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? "application/octet-stream"
-                let transferName = sqlite3_column_text(statement, 3).map { String(cString: $0) }
-                let totalBytes = sqlite3_column_int64(statement, 4)
+                guard let guidPtr = sqlite3_column_text(statement, 1) else { continue }
+                let guid = String(cString: guidPtr)
+                let filename = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+                let uti = sqlite3_column_text(statement, 3).map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 }
+                let mimeType = sqlite3_column_text(statement, 4).map { String(cString: $0) } ?? "application/octet-stream"
+                let transferName = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+                let totalBytes = sqlite3_column_int64(statement, 6)
+                let rowid = sqlite3_column_int64(statement, 0)
                 
                 let attachment = Attachment(
                     guid: guid,
                     filename: filename,
+                    uti: uti,
                     mimeType: mimeType,
                     transferName: transferName,
-                    totalBytes: totalBytes
+                    totalBytes: totalBytes,
+                    originalROWID: rowid
                 )
                 
                 attachments.append(attachment)
             }
-            
-            sqlite3_finalize(statement)
         }
         
         return attachments
@@ -359,25 +416,30 @@ class MessagesDatabase {
     private func getAttachmentByGuidUnlocked(_ attachmentGuid: String) -> (attachment: Attachment, path: String)? {
         guard let db = db else { return nil }
         let query = """
-        SELECT guid, filename, mime_type, transfer_name, total_bytes
+        SELECT ROWID, guid, filename, COALESCE(uti, '') AS uti, COALESCE(mime_type, 'application/octet-stream') AS mime_type, transfer_name, total_bytes
         FROM attachment WHERE guid = ?
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_text(statement, 1, attachmentGuid, -1, nil)
+        sqlite3_bind_text(statement, 1, attachmentGuid, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        let guid = String(cString: sqlite3_column_text(statement, 0))
-        let filename = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
-        let mimeType = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? "application/octet-stream"
-        let transferName = sqlite3_column_text(statement, 3).map { String(cString: $0) }
-        let totalBytes = sqlite3_column_int64(statement, 4)
+        let rowid = sqlite3_column_int64(statement, 0)
+        guard let guidPtr = sqlite3_column_text(statement, 1) else { return nil }
+        let guid = String(cString: guidPtr)
+        let filename = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+        let uti = sqlite3_column_text(statement, 3).map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 }
+        let mimeType = sqlite3_column_text(statement, 4).map { String(cString: $0) } ?? "application/octet-stream"
+        let transferName = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+        let totalBytes = sqlite3_column_int64(statement, 6)
         let attachment = Attachment(
             guid: guid,
             filename: filename,
+            uti: uti,
             mimeType: mimeType,
             transferName: transferName,
-            totalBytes: totalBytes
+            totalBytes: totalBytes,
+            originalROWID: rowid
         )
         let path = resolveAttachmentPath(filename: filename, transferName: transferName, guid: guid)
         return (attachment, path)
@@ -422,6 +484,7 @@ class MessagesDatabase {
             message.ROWID,
             message.guid,
             message.text,
+            message.attributedBody,
             message.date,
             message.date_read,
             message.is_from_me,
@@ -444,13 +507,23 @@ class MessagesDatabase {
             while sqlite3_step(statement) == SQLITE_ROW {
                 let rowId = sqlite3_column_int64(statement, 0)
                 let guid = String(cString: sqlite3_column_text(statement, 1))
-                let text = sqlite3_column_text(statement, 2).map { String(cString: $0) }
-                let dateCreated = sqlite3_column_int64(statement, 3)
-                let dateRead = sqlite3_column_int64(statement, 4)
-                let isFromMe = sqlite3_column_int(statement, 5) == 1
-                let sender = sqlite3_column_text(statement, 6).map { String(cString: $0) } ?? "Unknown"
-                let handleId = sqlite3_column_text(statement, 7).map { String(cString: $0) } ?? ""
-                let chatGuid = String(cString: sqlite3_column_text(statement, 8))
+                var text = sqlite3_column_text(statement, 2).map { String(cString: $0) }
+                let attributedBodyData: Data? = {
+                    guard let blob = sqlite3_column_blob(statement, 3) else { return nil }
+                    let bytes = sqlite3_column_bytes(statement, 3)
+                    guard bytes > 0 else { return nil }
+                    return Data(bytes: blob, count: Int(bytes))
+                }()
+                let dateCreated = sqlite3_column_int64(statement, 4)
+                let dateRead = sqlite3_column_int64(statement, 5)
+                let isFromMe = sqlite3_column_int(statement, 6) == 1
+                let sender = sqlite3_column_text(statement, 7).map { String(cString: $0) } ?? "Unknown"
+                let handleId = sqlite3_column_text(statement, 8).map { String(cString: $0) } ?? ""
+                let chatGuid = String(cString: sqlite3_column_text(statement, 9))
+                
+                if (text == nil || text?.isEmpty == true), let extracted = AttributedBodyDecoder.extractText(from: attributedBodyData) {
+                    text = extracted
+                }
                 
                 let attachments = getAttachmentsUnlocked(forMessageGuid: guid)
                 let message = Message(
