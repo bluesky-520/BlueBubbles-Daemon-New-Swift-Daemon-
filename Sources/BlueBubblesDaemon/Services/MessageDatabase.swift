@@ -446,6 +446,7 @@ class MessagesDatabase {
     }
 
     /// Resolve file path: use filename if absolute and exists; else try Messages/Attachments/XX/guid/filename.
+    /// Tries: absolute filename, Attachments/first2/guid/name, Attachments/guid/name (fallback), then best guess.
     private func resolveAttachmentPath(filename: String, transferName: String?, guid: String) -> String {
         let fm = FileManager.default
         if !filename.isEmpty && filename.hasPrefix("/") && fm.fileExists(atPath: filename) {
@@ -454,15 +455,21 @@ class MessagesDatabase {
         let messagesDir = (dbPath as NSString).deletingLastPathComponent
         let first2 = guid.count >= 2 ? String(guid.prefix(2)) : "00"
         let name = !filename.isEmpty ? (filename as NSString).lastPathComponent : (transferName ?? guid)
-        let candidate = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(guid)/\(name)")
-        if fm.fileExists(atPath: candidate) {
-            return candidate
+        // Standard layout: Attachments/at/at_1_XXX/FileName.png
+        let withFirst2 = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(guid)/\(name)")
+        if fm.fileExists(atPath: withFirst2) {
+            return withFirst2
+        }
+        // Some layouts use Attachments/guid/name without the first2 segment
+        let withoutFirst2 = (messagesDir as NSString).appendingPathComponent("Attachments/\(guid)/\(name)")
+        if fm.fileExists(atPath: withoutFirst2) {
+            return withoutFirst2
         }
         if !filename.isEmpty {
             let byFilename = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(guid)/\(filename)")
             if fm.fileExists(atPath: byFilename) { return byFilename }
         }
-        return candidate
+        return withFirst2
     }
     
     // MARK: - Polling for New Messages

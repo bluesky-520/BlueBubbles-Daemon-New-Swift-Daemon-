@@ -73,7 +73,9 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
             return Response(status: .notFound)
         }
         let path = result.path
+        logger.debug("Attachment path: \(path)")
         guard FileManager.default.fileExists(atPath: path) else {
+            logger.warning("Attachment file not found at path: \(path)")
             return Response(status: .notFound)
         }
         let data: Data
