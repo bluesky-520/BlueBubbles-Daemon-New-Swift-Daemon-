@@ -51,6 +51,17 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
             allMessages.append(contentsOf: recentMessages)
         }
 
+        // Include sent messages not yet in DB so bridge/client see them in updates immediately
+        for chat in allChats {
+            let sentRecent = sentMessageStore.getRecent(forChatGuid: chat.guid)
+            for sent in sentRecent {
+                guard sent.dateCreated > since else { continue }
+                if !allMessages.contains(where: { $0.guid == sent.guid }) {
+                    allMessages.append(sent)
+                }
+            }
+        }
+
         allMessages.sort { $0.dateCreated < $1.dateCreated }
 
         logger.debug("Found \(allMessages.count) updates")
@@ -63,7 +74,19 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
         )
     }
 
-    // MARK: - GET /attachments/:guid
+    // MARK: - GET /attachments/:guid/info (metadata only, for BlueBubbles socket get-attachment)
+
+    routes.get("attachments", ":guid", "info") { req async throws -> Attachment in
+        guard let guid = req.parameters.get("guid") else {
+            throw Abort(.badRequest)
+        }
+        guard let result = database.getAttachmentByGuid(guid) else {
+            throw Abort(.notFound)
+        }
+        return result.attachment
+    }
+
+    // MARK: - GET /attachments/:guid (full file or byte range; Range header supported)
 
     routes.get("attachments", ":guid") { req async throws -> Response in
         guard let guid = req.parameters.get("guid") else {
@@ -78,17 +101,52 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
             logger.warning("Attachment file not found at path: \(path)")
             return Response(status: .notFound)
         }
-        let data: Data
+        let fileURL = URL(fileURLWithPath: path)
+        let totalBytes: Int64
         do {
-            data = try Data(contentsOf: URL(fileURLWithPath: path))
+            totalBytes = Int64(try FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64 ?? 0)
         } catch {
-            logger.error("Failed to read attachment file: \(error.localizedDescription)")
+            logger.error("Failed to get file size: \(error.localizedDescription)")
             return Response(status: .internalServerError)
         }
+        let rangeHeader = req.headers[.range].first
+        var data: Data
+        var status: HTTPResponseStatus = .ok
+        var contentRange: String? = nil
+        if let range = rangeHeader?.replacingOccurrences(of: "bytes=", with: "").trimmingCharacters(in: .whitespaces),
+           let dashIndex = range.firstIndex(of: "-") {
+            let startStr = String(range[..<dashIndex]).trimmingCharacters(in: .whitespaces)
+            let endStr = String(range[range.index(after: dashIndex)...]).trimmingCharacters(in: .whitespaces)
+            let start = Int64(startStr) ?? 0
+            let end: Int64 = endStr.isEmpty ? totalBytes - 1 : min(Int64(endStr) ?? totalBytes - 1, totalBytes - 1)
+            let length = max(0, end - start + 1)
+            if start >= 0, length > 0, start < totalBytes {
+                guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+                    return Response(status: .internalServerError)
+                }
+                defer { try? handle.close() }
+                try? handle.seek(toOffset: UInt64(start))
+                data = (try? handle.read(upToCount: Int(length))) ?? Data()
+                status = .partialContent
+                contentRange = "bytes \(start)-\(start + Int64(data.count) - 1)/\(totalBytes)"
+            } else {
+                data = try Data(contentsOf: fileURL)
+            }
+        } else {
+            data = try Data(contentsOf: fileURL)
+        }
         let downloadName = result.attachment.filename.isEmpty ? guid : (result.attachment.filename as NSString).lastPathComponent
-        let response = Response(status: .ok)
+        let response = Response(status: status)
+        // Advertise byte-range support (clients use Range for previews/streaming).
+        response.headers.add(name: "Accept-Ranges", value: "bytes")
         response.headers.contentType = .init(type: result.attachment.mimeType.split(separator: "/").first.map(String.init) ?? "application", subType: result.attachment.mimeType.split(separator: "/").dropFirst().first.map(String.init) ?? "octet-stream")
         response.headers.add(name: "Content-Disposition", value: "attachment; filename=\"\(downloadName)\"")
+        if totalBytes > 0 {
+            response.headers.add(name: "Content-Length", value: "\(data.count)")
+        }
+        if let cr = contentRange {
+            response.headers.add(name: "Content-Range", value: cr)
+        }
         response.body = .init(buffer: ByteBuffer(data: data))
         return response
     }
