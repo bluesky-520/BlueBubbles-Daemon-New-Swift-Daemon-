@@ -11,6 +11,10 @@ struct Config {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(homeDir)/Library/Messages/chat.db"
     }
+
+    static var messagesDBWalPath: String {
+        return "\(messagesDBPath)-wal"
+    }
     
     // Polling Configuration
     static let pollInterval: TimeInterval = 1.0  // seconds

@@ -31,12 +31,12 @@ class MessagePoller {
             withTimeInterval: Config.pollInterval,
             repeats: true
         ) { [weak self] _ in
-            self?.pollForNewMessages()
+            self?.pollNow()
         }
         
         // Run immediately on start
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.pollForNewMessages()
+            self.pollNow()
         }
     }
     
@@ -52,7 +52,7 @@ class MessagePoller {
     
     // MARK: - Polling Logic
     
-    private func pollForNewMessages() {
+    func pollNow() {
         guard database.isOpen else {
             logger.warning("Database not open, skipping poll")
             return

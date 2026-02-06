@@ -42,16 +42,24 @@ func messageRoutes(_ routes: RoutesBuilder, database: MessagesDatabase, sentMess
 
         logger.debug("Fetching updates since: \(since) (raw: \(sinceRaw))")
 
-        let allChats = database.getAllChats()
-        var allMessages: [Message] = []
+        // Official server uses an indexed lookback (1 week) on dateCreated.
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let nowAppleNs = sinceMsToAppleNs(nowMs)
+        let weekNs: Int64 = 7 * 24 * 60 * 60 * 1_000_000_000
+        let base = since > 0 ? since : nowAppleNs
+        let lookback = max(0, base - weekNs)
 
-        for chat in allChats {
-            let messages = database.getMessages(forChatGuid: chat.guid, limit: 100)
-            let recentMessages = messages.filter { $0.dateCreated > since }
-            allMessages.append(contentsOf: recentMessages)
+        var allMessages = database.getMessagesSince(earliestDate: lookback)
+
+        // Filter to actual since window (dateCreated or dateRead for sent messages)
+        allMessages = allMessages.filter { msg in
+            if msg.dateCreated > since { return true }
+            if msg.isFromMe, let read = msg.dateRead, read > since { return true }
+            return false
         }
 
         // Include sent messages not yet in DB so bridge/client see them in updates immediately
+        let allChats = database.getAllChats()
         for chat in allChats {
             let sentRecent = sentMessageStore.getRecent(forChatGuid: chat.guid)
             for sent in sentRecent {

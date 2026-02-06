@@ -10,6 +10,11 @@ struct BlueBubblesDaemon {
         let database = MessagesDatabase()
         let appleScriptSender = AppleScriptSender()
         let messagePoller = MessagePoller(database: database)
+        let messageWatcher = MessageWatcher(
+            filePaths: [Config.messagesDBPath, Config.messagesDBWalPath],
+            poller: messagePoller,
+            debounceDelay: 0.5
+        )
         let contactsController = ContactsController()
         let sentMessageStore = SentMessageStore()
         let incomingMessageStore = IncomingMessageStore()
@@ -29,8 +34,8 @@ struct BlueBubblesDaemon {
             }
         }
 
-        // Start poller
-        messagePoller.start()
+        // Start watcher (file changes trigger polling)
+        messageWatcher.start()
 
         // Setup Vapor app
         let env = try Environment.detect()

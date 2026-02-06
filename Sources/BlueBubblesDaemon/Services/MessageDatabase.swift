@@ -242,6 +242,14 @@ class MessagesDatabase {
             getMessagesUnlocked(forChatGuid: chatGuid, limit: limit, before: before)
         }
     }
+
+    /// Returns messages across all chats after a given Apple ns timestamp.
+    /// Used by /messages/updates to match official server lookback behavior.
+    func getMessagesSince(earliestDate: Int64, limit: Int = 2000) -> [Message] {
+        dbQueue.sync {
+            getMessagesSinceUnlocked(earliestDate: earliestDate, limit: limit)
+        }
+    }
     
     private func getMessagesUnlocked(forChatGuid chatGuid: String, limit: Int = 50, before: Int64? = nil) -> [Message] {
         guard let db = db else {
@@ -344,6 +352,93 @@ class MessagesDatabase {
         }
         
         return messages.reversed()
+    }
+
+    private func getMessagesSinceUnlocked(earliestDate: Int64, limit: Int = 2000) -> [Message] {
+        guard let db = db else { return [] }
+
+        var messages: [Message] = []
+
+        // Use dateCreated (message.date) for the indexed lookback query
+        let query = """
+        SELECT
+            message.guid,
+            message.text,
+            message.attributedBody,
+            message.date,
+            message.date_read,
+            message.is_from_me,
+            message.subject,
+            message.error,
+            message.associated_message_guid,
+            message.associated_message_type,
+            COALESCE(handle.id, '') AS handle_id,
+            chat.guid AS chat_guid
+        FROM message
+        LEFT JOIN handle ON message.handle_id = handle.ROWID
+        JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
+        JOIN chat ON chat_message_join.chat_id = chat.ROWID
+        WHERE message.date > ?
+        ORDER BY message.date ASC
+        LIMIT ?
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
+            logger.error("Failed to prepare messages-since query: \(String(cString: sqlite3_errmsg(db)))")
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, earliestDate)
+        sqlite3_bind_int(statement, 2, Int32(limit))
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let guidPtr = sqlite3_column_text(statement, 0) else { continue }
+            let guid = String(cString: guidPtr)
+            var text = sqlite3_column_text(statement, 1).map { String(cString: $0) }
+            let attributedBodyData: Data? = {
+                guard let blob = sqlite3_column_blob(statement, 2) else { return nil }
+                let bytes = sqlite3_column_bytes(statement, 2)
+                guard bytes > 0 else { return nil }
+                return Data(bytes: blob, count: Int(bytes))
+            }()
+            let dateCreated = sqlite3_column_int64(statement, 3)
+            let dateRead = sqlite3_column_int64(statement, 4)
+            let isFromMe = sqlite3_column_int(statement, 5) == 1
+            let subject = sqlite3_column_text(statement, 6).map { String(cString: $0) }
+            let error = Int(sqlite3_column_int(statement, 7))
+            let associatedMessageGuid = sqlite3_column_text(statement, 8).map { String(cString: $0) }
+            let associatedMessageType = sqlite3_column_text(statement, 9).map { String(cString: $0) }
+            let handleId = sqlite3_column_text(statement, 10).map { String(cString: $0) } ?? ""
+            let chatGuid = sqlite3_column_text(statement, 11).map { String(cString: $0) }
+
+            if (text == nil || text?.isEmpty == true),
+               let extracted = AttributedBodyDecoder.extractText(from: attributedBodyData) {
+                text = extracted
+            }
+
+            let attachments = getAttachmentsUnlocked(forMessageGuid: guid)
+            let message = Message(
+                guid: guid,
+                text: text,
+                sender: handleId.isEmpty ? "Unknown" : handleId,
+                handleId: handleId,
+                dateCreated: dateCreated,
+                dateRead: dateRead > 0 ? dateRead : nil,
+                isFromMe: isFromMe,
+                type: "text",
+                attachments: attachments.isEmpty ? nil : attachments,
+                subject: subject,
+                error: error != 0 ? error : nil,
+                associatedMessageGuid: associatedMessageGuid,
+                associatedMessageType: associatedMessageType,
+                chatGuid: chatGuid
+            )
+            messages.append(message)
+        }
+
+        return messages
     }
     
     func getAttachments(forMessageGuid messageGuid: String) -> [Attachment] {
