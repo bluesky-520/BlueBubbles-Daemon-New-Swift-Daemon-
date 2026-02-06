@@ -8,6 +8,7 @@ class MessagesDatabase {
     private let dbPath: String
     private var db: OpaquePointer?
     private let dbQueue = DispatchQueue(label: "com.bluebubbles.messagesdb.serial")
+    private var hasOriginalGuidColumnCache: Bool? = nil
     
     private(set) var lastProcessedRowId: Int64 = 0
     
@@ -413,11 +414,13 @@ class MessagesDatabase {
         }
     }
 
-    /// Look up attachment by GUID. Matches official BlueBubbles behavior: exact match first,
-    /// then LIKE '%guid' so stored values like p:/UUID or at_1_UUID match when client sends plain UUID.
+    /// Look up attachment by GUID. Matches official BlueBubbles behavior:
+    /// use original_guid when available, else guid, with LIKE '%guid'.
     private func getAttachmentByGuidUnlocked(_ attachmentGuid: String) -> (attachment: Attachment, path: String)? {
         guard let db = db else { return nil }
         let likePattern: (String) -> String = { "%" + $0 }
+        let hasOriginalGuid = hasOriginalGuidColumnCache ?? hasAttachmentColumn(db: db, columnName: "original_guid")
+        hasOriginalGuidColumnCache = hasOriginalGuid
         let lookupGuids: [String] = {
             var list = [attachmentGuid]
             if attachmentGuid.count > 36 {
@@ -426,11 +429,15 @@ class MessagesDatabase {
             return list
         }()
         for lookupGuid in lookupGuids {
-            // 1) Exact match (same as official server's first try)
-            if let result = getAttachmentByGuidUnlockedQuery(db, whereClause: "guid = ?1", bind: lookupGuid) {
+            // Prefer original_guid when available (official server behavior)
+            if hasOriginalGuid,
+               let result = getAttachmentByGuidUnlockedQuery(
+                db,
+                whereClause: "original_guid LIKE ?1 OR guid LIKE ?1",
+                bind: likePattern(lookupGuid)
+               ) {
                 return result
             }
-            // 2) LIKE '%lookupGuid' so p:/UUID or at_1_UUID in DB matches client sending UUID
             if let result = getAttachmentByGuidUnlockedQuery(db, whereClause: "guid LIKE ?1", bind: likePattern(lookupGuid)) {
                 return result
             }
@@ -451,7 +458,11 @@ class MessagesDatabase {
         let rowid = sqlite3_column_int64(statement, 0)
         guard let guidPtr = sqlite3_column_text(statement, 1) else { return nil }
         let guid = String(cString: guidPtr)
-        let filename = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+        var filename = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+        if filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let fallback = lookupAttachmentFilenameByGuidSuffix(db: db, guid: guid) {
+            filename = fallback
+        }
         let uti = sqlite3_column_text(statement, 3).map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 }
         let mimeType = sqlite3_column_text(statement, 4).map { String(cString: $0) } ?? "application/octet-stream"
         let transferName = sqlite3_column_text(statement, 5).map { String(cString: $0) }
@@ -465,108 +476,72 @@ class MessagesDatabase {
             totalBytes: totalBytes,
             originalROWID: rowid
         )
-        let path = resolveAttachmentPath(filename: filename, transferName: transferName, guid: guid)
+        let path = resolveAttachmentPath(filename: filename)
         return (attachment, path)
     }
 
     /// Resolve attachment file path on disk.
-    ///
-    /// The `attachment.filename` column is not guaranteed to be an absolute POSIX path. Depending on macOS version
-    /// and attachment type it may be:
-    /// - absolute: `/Users/.../Library/Messages/Attachments/...`
-    /// - tilde: `~/Library/Messages/Attachments/...`
-    /// - file URL: `file:///Users/.../Library/Messages/Attachments/...`
-    /// - relative: `Attachments/...` (relative to `~/Library/Messages`)
-    ///
-    /// This method tries common formats first, then falls back to GUID-based layouts.
-    /// Uses the last 36 chars of guid for path building when DB stores prefixed guid (e.g. `p:/UUID`, `at_1_UUID`).
-    private func resolveAttachmentPath(filename: String, transferName: String?, guid: String) -> String {
-        let fm = FileManager.default
-        let pathGuid = guid.count > 36 ? String(guid.suffix(36)) : guid
-        let messagesDir = (dbPath as NSString).deletingLastPathComponent
-        let first2 = pathGuid.count >= 2 ? String(pathGuid.prefix(2)) : "00"
-        let name = !filename.isEmpty ? (filename as NSString).lastPathComponent : (transferName ?? pathGuid)
-
-        func fileExists(_ p: String) -> Bool {
-            var isDir: ObjCBool = false
-            return fm.fileExists(atPath: p, isDirectory: &isDir) && !isDir.boolValue
-        }
-
-        func addCandidate(_ p: String, to list: inout [String]) {
-            guard !p.isEmpty else { return }
-            if !list.contains(p) { list.append(p) }
-        }
-
-        var candidates: [String] = []
-
-        // 1) Use filename as-is when absolute and exists
+    /// Matches official BlueBubbles behavior: return the DB filename
+    /// with tilde expansion only (no path reconstruction).
+    private func resolveAttachmentPath(filename: String) -> String {
         let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            if trimmed.hasPrefix("file://"), let url = URL(string: trimmed), url.isFileURL {
-                addCandidate(url.path, to: &candidates)
-            }
+        // Expand tilde paths (~/...) when we have a filename.
+        let expanded = trimmed.isEmpty ? "" : (trimmed as NSString).expandingTildeInPath
+        if !expanded.isEmpty, FileManager.default.fileExists(atPath: expanded) {
+            return expanded
+        }
 
-            // Expand tilde paths (~/...)
-            let expandedTilde = (trimmed as NSString).expandingTildeInPath
-            addCandidate(expandedTilde, to: &candidates)
-
-            // If relative, try relative to ~/Library/Messages
-            if !trimmed.hasPrefix("/") {
-                addCandidate((messagesDir as NSString).appendingPathComponent(trimmed), to: &candidates)
-            }
-
-            // If it contains "Attachments/..." anywhere, try anchoring from ~/Library/Messages/Attachments/...
-            if let r = trimmed.range(of: "Attachments/") {
-                let rel = String(trimmed[r.lowerBound...])
-                addCandidate((messagesDir as NSString).appendingPathComponent(rel), to: &candidates)
-            }
-
-            // Some DB values are missing a leading "/" (e.g. "Library/Messages/Attachments/...").
-            if trimmed.hasPrefix("Library/") || trimmed.contains("Library/Messages/") {
-                let home = NSHomeDirectory()
-                addCandidate((home as NSString).appendingPathComponent(trimmed), to: &candidates)
+        let attachmentsRoot = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Messages/Attachments")
+        let normalized = expanded.replacingOccurrences(of: "\\", with: "/")
+        if let range = normalized.range(of: "/Attachments/") {
+            let suffix = String(normalized[range.upperBound...])
+            let candidate = (attachmentsRoot as NSString).appendingPathComponent(suffix)
+            if FileManager.default.fileExists(atPath: candidate) {
+                return candidate
             }
         }
 
-        // 2) GUID-based common layouts
-        addCandidate((messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(pathGuid)/\(name)"), to: &candidates)
-        addCandidate((messagesDir as NSString).appendingPathComponent("Attachments/\(pathGuid)/\(name)"), to: &candidates)
-        if let transferName, !transferName.isEmpty, transferName != name {
-            addCandidate((messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(pathGuid)/\(transferName)"), to: &candidates)
-            addCandidate((messagesDir as NSString).appendingPathComponent("Attachments/\(pathGuid)/\(transferName)"), to: &candidates)
+        return expanded
+    }
+
+    private func lookupAttachmentFilenameByGuidSuffix(db: OpaquePointer?, guid: String) -> String? {
+        guard let db = db else { return nil }
+        let guidTrimmed = guid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !guidTrimmed.isEmpty else { return nil }
+        let suffix = guidTrimmed.count > 36 ? String(guidTrimmed.suffix(36)) : guidTrimmed
+        let likePattern = "%" + suffix
+        let hasOriginalGuid = hasOriginalGuidColumnCache ?? hasAttachmentColumn(db: db, columnName: "original_guid")
+        hasOriginalGuidColumnCache = hasOriginalGuid
+        let whereClause = hasOriginalGuid
+            ? "(original_guid LIKE ?1 OR guid LIKE ?1)"
+            : "guid LIKE ?1"
+        let query = """
+        SELECT filename FROM attachment
+        WHERE filename IS NOT NULL AND filename != '' AND \(whereClause)
+        LIMIT 1
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, likePattern, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_text(statement, 0).map { String(cString: $0) }
+    }
+
+    /// Check if the attachment table contains a column (e.g. original_guid).
+    private func hasAttachmentColumn(db: OpaquePointer?, columnName: String) -> Bool {
+        guard let db = db else { return false }
+        let query = "PRAGMA table_info(attachment)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let cString = sqlite3_column_text(statement, 1) {
+                let name = String(cString: cString)
+                if name == columnName { return true }
+            }
         }
-
-        // 3) If filename already includes path segments, try it under Attachments/XX/GUID/
-        if !trimmed.isEmpty {
-            addCandidate((messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(pathGuid)/\(trimmed)"), to: &candidates)
-        }
-
-        for p in candidates {
-            if fileExists(p) { return p }
-        }
-
-        // 4) Fallback: scan the expected attachment directory for this GUID and pick any file.
-        // This helps when `filename` in chat.db is empty/mismatched but the attachment was still stored on disk.
-        func firstFileInDirectory(_ dirPath: String) -> String? {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: dirPath, isDirectory: &isDir), isDir.boolValue else { return nil }
-            guard let items = try? fm.contentsOfDirectory(atPath: dirPath), !items.isEmpty else { return nil }
-            // Prefer a file that matches the expected lastPathComponent first
-            let preferred = items.first(where: { $0 == name }) ?? items.first(where: { $0 != ".DS_Store" })
-            guard let item = preferred else { return nil }
-            let full = (dirPath as NSString).appendingPathComponent(item)
-            return fileExists(full) ? full : nil
-        }
-
-        let dirWithFirst2 = (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(pathGuid)")
-        if let found = firstFileInDirectory(dirWithFirst2) { return found }
-        let dirWithoutFirst2 = (messagesDir as NSString).appendingPathComponent("Attachments/\(pathGuid)")
-        if let found = firstFileInDirectory(dirWithoutFirst2) { return found }
-
-        logger.debug("Attachment path resolve miss: guid=\(guid), filename=\(trimmed), transferName=\(transferName ?? ""), tried=\(candidates.joined(separator: " | "))")
-
-        // Nothing matched; return the most likely default (lets caller log & 404 cleanly)
-        return (messagesDir as NSString).appendingPathComponent("Attachments/\(first2)/\(pathGuid)/\(name)")
+        return false
     }
     
     // MARK: - Polling for New Messages

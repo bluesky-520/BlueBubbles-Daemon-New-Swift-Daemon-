@@ -1,3 +1,4 @@
+import Foundation
 import Vapor
 
 func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender, database: MessagesDatabase, sentMessageStore: SentMessageStore, sendCache: SendCache, receiptStore: ReceiptStore) throws {
@@ -26,12 +27,13 @@ func sendRoutes(_ routes: RoutesBuilder, appleScriptSender: AppleScriptSender, d
 
         let chatIdentifier = database.getChatIdentifier(forChatGuid: payload.chat_guid)
         let recipients = database.getChatRecipients(forChatGuid: payload.chat_guid)
+        let resolvedPaths = resolveAttachmentPaths(payload.attachment_paths)
         let success = appleScriptSender.sendMessage(
             toChatWithGuid: payload.chat_guid,
             text: payload.text,
             chatIdentifier: chatIdentifier,
             recipients: recipients,
-            attachmentPaths: payload.attachment_paths
+            attachmentPaths: resolvedPaths
         )
 
         if success {
@@ -133,4 +135,30 @@ private func jsonResponse<T: Encodable>(status: HTTPStatus, body: T) throws -> R
     res.headers.contentType = .json
     res.body = .init(data: data)
     return res
+}
+
+/// Resolve attachment paths to match the official BlueBubbles private-api storage.
+/// - Absolute paths are preserved.
+/// - `file://` URLs are converted to POSIX paths.
+/// - Relative paths (e.g. "uuid/filename") are resolved under
+///   ~/Library/Messages/Attachments/BlueBubbles.
+private func resolveAttachmentPaths(_ paths: [String]?) -> [String]? {
+    guard let paths = paths else { return nil }
+    let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+    let privateApiDir = "\(homeDir)/Library/Messages/Attachments/BlueBubbles"
+    let resolved = paths.compactMap { raw -> String? in
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        let normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
+        if normalized.hasPrefix("file://"), let url = URL(string: normalized), url.isFileURL {
+            return url.path
+        }
+        let expandedTilde = (normalized as NSString).expandingTildeInPath
+        if expandedTilde.hasPrefix("/") {
+            return (expandedTilde as NSString).standardizingPath
+        }
+        let joined = (privateApiDir as NSString).appendingPathComponent(expandedTilde)
+        return (joined as NSString).standardizingPath
+    }
+    return resolved.isEmpty ? nil : resolved
 }
