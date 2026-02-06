@@ -30,9 +30,9 @@ Edit `Sources/BlueBubblesDaemon/Utils/Config.swift`:
 |------------------|----------------------------|--------------------------------|
 | `httpHost`       | `"127.0.0.1"`             | Bind address                   |
 | `httpPort`       | `8081`                    | HTTP port                      |
-| `messagesDBPath` | `~/Library/Messages/chat.db`| Messages database path         |
+| `messagesDBPath` | `~/Library/Messages/chat.db`| Messages database path (computed from home dir) |
 | `pollInterval`   | `1.0`                     | New-message poll interval (s)  |
-| `logLevel`       | `"info"`                  | `trace` / `debug` / `info` / `warning` / `error` |
+| `logLevel`       | `"info"`                  | `trace` / `debug` / `info` / `warning` / `warn` / `error` |
 
 ## Build and run
 
@@ -80,7 +80,15 @@ Example: `GET /chats/SMS%3B-%3B%2B13108771635/messages?limit=10`
 | Method | Path                    | Description |
 |--------|-------------------------|-------------|
 | GET    | `/messages/updates`     | New messages, typing, read receipts since `since`. Query: `since` (ms since Unix epoch or Apple nanoseconds; values &lt; 10¹⁵ treated as ms) |
-| GET    | `/attachments/:guid`    | Stream attachment file (Content-Type, Content-Disposition set) |
+| GET    | `/attachments/:guid/info` | Attachment metadata only |
+| GET    | `/attachments/:guid`    | Stream attachment file (Content-Type, Content-Disposition set; Range supported) |
+
+### Statistics
+
+| Method | Path                    | Description |
+|--------|-------------------------|-------------|
+| GET    | `/statistics/totals`    | JSON: `handles`, `messages`, `chats`, `attachments`. Query: `only` (comma-separated subset, e.g. `only=messages,chats`) |
+| GET    | `/statistics/media`     | JSON: `images`, `videos`, `locations`. Query: `only` (comma-separated subset) |
 
 ### Send & actions
 
@@ -96,7 +104,7 @@ Example: `GET /chats/SMS%3B-%3B%2B13108771635/messages?limit=10`
 |--------|-------------------|-------------|
 | GET    | `/contacts`       | List contacts. Query: `limit`, `offset`, `extraProperties` (e.g. `avatar`) |
 | GET    | `/contacts/vcf`   | Contacts as vCard string |
-| GET    | `/contacts/changed` | JSON: `lastChanged` timestamp (for polling) |
+| GET    | `/contacts/changed` | JSON: `lastChanged` timestamp (Unix seconds, for polling) |
 
 ### Events (SSE)
 
